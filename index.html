@@ -628,17 +628,24 @@ function openDB() {
 async function save() {
   try {
     const d = await openDB();
-    const tx = d.transaction(DB_STORE, 'readwrite');
-    const store = tx.objectStore(DB_STORE);
-    // Clear all then re-add (simplest approach for full sync)
-    store.clear();
-    spots.forEach(s => store.put(s));
-    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
-    // Also save to localStorage as backup (without coverImage to stay under limit)
+    await new Promise((res, rej) => {
+      const tx = d.transaction(DB_STORE, 'readwrite');
+      const store = tx.objectStore(DB_STORE);
+      const clearReq = store.clear();
+      clearReq.onsuccess = () => {
+        // Only put() after clear() is confirmed done
+        spots.forEach(s => store.put(s));
+      };
+      clearReq.onerror = () => rej(clearReq.error);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+      tx.onabort = () => rej(tx.error);
+    });
+    // Slim backup to localStorage (no coverImage to avoid 5MB limit)
     try {
       const slim = spots.map(({coverImage, ...rest}) => rest);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
-    } catch(e) { /* localStorage full, IndexedDB is primary anyway */ }
+    } catch(e) { /* localStorage full — IndexedDB is primary */ }
     showSaveStatus('✓');
   } catch(e) {
     console.error('IndexedDB save failed:', e);
@@ -649,23 +656,23 @@ async function save() {
 async function load() {
   try {
     const d = await openDB();
-    const tx = d.transaction(DB_STORE, 'readonly');
-    const store = tx.objectStore(DB_STORE);
-    const req = store.getAll();
-    await new Promise((res, rej) => { req.onsuccess = res; req.onerror = rej; });
-    const all = req.result || [];
+    const all = await new Promise((res, rej) => {
+      const tx = d.transaction(DB_STORE, 'readonly');
+      const req = tx.objectStore(DB_STORE).getAll();
+      req.onsuccess = () => res(req.result || []);
+      req.onerror = () => rej(req.error);
+    });
     if (all.length > 0) {
-      // Sort by id desc (newest first)
       spots = all.sort((a, b) => Number(b.id) - Number(a.id));
     } else {
-      // Fallback: try localStorage
+      // Fallback: localStorage backup
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
         spots = raw ? JSON.parse(raw) : [];
       } catch(e) { spots = []; }
     }
   } catch(e) {
-    // IndexedDB not available, fall back to localStorage
+    // IndexedDB unavailable, use localStorage
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       spots = raw ? JSON.parse(raw) : [];
